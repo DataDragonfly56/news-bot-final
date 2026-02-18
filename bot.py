@@ -1,91 +1,77 @@
-import feedparser, telebot, os, requests, time, re, logging
-from google import genai
-from urllib.parse import urlparse, quote
-from io import BytesIO
+import feedparser
+import telebot
+import google.generativeai as genai
+import os
+import requests
+import re
 
-logging.basicConfig(level=logging.INFO)
+# Настройки
+TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
+GITHUB_TOKEN = os.environ.get("MY_GIT_TOKEN")
+REPO = os.environ.get("MY_REPO") # Используем твой секрет
+CHANNEL_ID = "@cryptoteamko"
+RSS_URL = "https://news.google.com/rss/search?q=криптовалюта+биткоин&hl=ru&gl=RU&ceid=RU:ru"
 
-# --- НАСТРОЙКИ (Берутся из твоих Secrets) ---
-T_TOKEN = os.environ.get("TELEGRAM_TOKEN")
-G_KEY = os.environ.get("GEMINI_API_KEY")
-GIT_T = os.environ.get("MY_GIT_TOKEN")
-REPO = os.environ.get("MY_REPO")
-CH_ID = "@cryptoteamko"
+genai.configure(api_key=GEMINI_API_KEY)
 
-SOURCES = [
-    "https://cointelegraph.com/rss",
-    "https://decrypt.co/feed"
-]
-
-def get_last_link():
-    url = f"https://api.github.com/repos/{REPO}/issues?state=all&labels=last_news&per_page=1"
+def get_last_seen_link():
+    url = f"https://api.github.com/repos/{REPO}/issues?state=all&labels=last_news"
+    headers = {"Authorization": f"token {GITHUB_TOKEN}"}
     try:
-        res = requests.get(url, headers={"Authorization": f"token {GIT_T}"}, timeout=10).json()
-        return res[0].get('body', "").strip() if res else ""
-    except: return ""
+        res = requests.get(url, headers=headers).json()
+        if isinstance(res, list) and len(res) > 0:
+            return res[0].get('body', "").strip()
+    except:
+        pass
+    return ""
 
 def save_last_link(link):
     url = f"https://api.github.com/repos/{REPO}/issues"
-    try:
-        payload = {"title": f"Log {time.strftime('%H:%M')}", "body": link, "labels": ["last_news"]}
-        requests.post(url, headers={"Authorization": f"token {GIT_T}"}, json=payload, timeout=10)
-    except: pass
-
-def generate_content(title, desc, domain):
-    try:
-        # Используем v1beta — она самая стабильная для новых ключей
-        client = genai.Client(api_key=G_KEY, http_options={'api_version': 'v1beta'})
-        
-        prompt = (
-            f"Ты — профессиональный крипто-блогер. Напиши краткий пост.\n"
-            f"НОВОСТЬ: {title}\nСУТЬ: {desc}\n\n"
-            f"ПРАВИЛА:\n"
-            f"1. Только РУССКИЙ язык.\n"
-            f"2. УДАЛИ все ссылки.\n"
-            f"3. ЗАПРЕЩЕНЫ фразы: 'Актуальная новость', 'Вот подробности', 'Читать далее'.\n"
-            f"4. СТРУКТУРА: **Жирный заголовок**, 2 предложения сути. В конце 'Источник: {domain}' (текстом, не ссылкой)."
-        )
-        
-        # Используем модель flash-001 (она самая быстрая и безотказная)
-        response = client.models.generate_content(model="gemini-1.5-flash-001", contents=prompt)
-        
-        if not response.text: return None
-        
-        # Финальная чистка текста от остатков ссылок
-        clean_text = re.sub(r'http\S+', '', response.text).strip()
-        return clean_text
-    except Exception as e:
-        logging.error(f"AI Error: {e}")
-        return None
+    headers = {"Authorization": f"token {GITHUB_TOKEN}"}
+    data = {"title": "Last Checked News", "body": link, "labels": ["last_news"]}
+    requests.post(url, headers=headers, json=data)
 
 def run_bot():
-    bot = telebot.TeleBot(T_TOKEN)
-    all_news = []
-    for url in SOURCES:
+    bot = telebot.TeleBot(TELEGRAM_TOKEN)
+    # Используем проверенный метод выбора модели
+    available_models = [m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
+    model = genai.GenerativeModel(available_models[0])
+    
+    feed = feedparser.parse(RSS_URL)
+    
+    if feed.entries:
+        entry = feed.entries[0]
+        title, link = entry.title, entry.link
+        
+        if link.strip() == get_last_seen_link():
+            print("Эта новость уже была.")
+            return
+
         try:
-            feed = feedparser.parse(url)
-            all_news.extend(feed.entries)
-        except: continue
-    
-    all_news.sort(key=lambda x: x.get('published_parsed', (0,)), reverse=True)
-    last_saved = get_last_link()
-    
-    for entry in all_news[:5]:
-        link = entry.link.strip()
-        if link == last_saved: break
-        
-        domain = urlparse(link).netloc.replace('www.', '').capitalize()
-        text = generate_content(entry.title, entry.get('summary', ''), domain)
-        
-        if text:
-            try:
-                # Отправляем сообщение без лишних кнопок и ссылок
-                bot.send_message(CH_ID, text=text, parse_mode='Markdown')
+            # СТРОГАЯ ИНСТРУКЦИЯ: Текст на русском, без ссылок, без мусора
+            instr = (
+                f"Напиши профессиональный пост по новости: {title}. "
+                f"ПРАВИЛА: 1. Только РУССКИЙ язык. 2. УДАЛИ любые ссылки. "
+                f"3. Формат: **Жирный заголовок**, затем коротко суть (2 предложения). "
+                f"4. НЕ пиши 'Актуальная новость' или 'Вот текст'."
+            )
+            
+            post_res = model.generate_content(instr)
+            text = post_res.text
+            
+            # Дополнительная очистка от ссылок (на всякий случай)
+            text = re.sub(r'http\S+', '', text).strip()
+
+            if text:
+                bot.send_message(CHANNEL_ID, text, parse_mode='Markdown')
+                print("Пост отправлен!")
                 save_last_link(link)
-                logging.info("Успешно опубликовано")
-                return # За один запуск постим одну новость
-            except Exception as e:
-                logging.error(f"TG Error: {e}")
+            
+        except Exception as e:
+            print(f"Ошибка: {e}")
+    else:
+        print("Новостей нет.")
 
 if __name__ == "__main__":
     run_bot()
