@@ -1,8 +1,8 @@
 name: Crypto Bot
 on:
   schedule:
-    - cron: '*/30 * * * *' # Будет проверять новости каждые 30 минут
-  workflow_dispatch: # Позволяет запустить вручную
+    - cron: '*/30 * * * *'
+  workflow_dispatch:
 
 jobs:
   build:
@@ -14,7 +14,8 @@ jobs:
         with:
           python-version: '3.9'
       - name: Install deps
-        run: pip install feedparser telebot google-genai requests
+        # МЫ ЗАМЕНИЛИ google-genai НА google-generativeai, КАК В ТВОЕМ РАБОЧЕМ КОДЕ
+        run: pip install feedparser pyTelegramBotAPI google-generativeai requests
       - name: Run bot
         env:
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
