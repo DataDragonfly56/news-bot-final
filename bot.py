@@ -5,12 +5,12 @@ from io import BytesIO
 
 logging.basicConfig(level=logging.INFO)
 
-# Ключи берутся из тех самых Secrets, что ты только что заполнил
+# --- НАСТРОЙКИ (Берутся из твоих Secrets) ---
 T_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 G_KEY = os.environ.get("GEMINI_API_KEY")
 GIT_T = os.environ.get("MY_GIT_TOKEN")
 REPO = os.environ.get("MY_REPO")
-CH_ID = "@cryptoteamko" # Твой канал
+CH_ID = "@cryptoteamko"
 
 SOURCES = [
     "https://cointelegraph.com/rss",
@@ -33,14 +33,27 @@ def save_last_link(link):
 
 def generate_content(title, desc, domain):
     try:
-        # Принудительно v1, чтобы не было ошибки 404
-        client = genai.Client(api_key=G_KEY, http_options={'api_version': 'v1'})
+        # Используем v1beta — она самая стабильная для новых ключей
+        client = genai.Client(api_key=G_KEY, http_options={'api_version': 'v1beta'})
+        
         prompt = (
-            f"Напиши пост на РУССКОМ.\nЗАГОЛОВОК: {title}\nСУТЬ: {desc}\n"
-            f"ПРАВИЛА: Без ссылок, без английского. В конце напиши 'Источник: {domain}'."
+            f"Ты — профессиональный крипто-блогер. Напиши краткий пост.\n"
+            f"НОВОСТЬ: {title}\nСУТЬ: {desc}\n\n"
+            f"ПРАВИЛА:\n"
+            f"1. Только РУССКИЙ язык.\n"
+            f"2. УДАЛИ все ссылки.\n"
+            f"3. ЗАПРЕЩЕНЫ фразы: 'Актуальная новость', 'Вот подробности', 'Читать далее'.\n"
+            f"4. СТРУКТУРА: **Жирный заголовок**, 2 предложения сути. В конце 'Источник: {domain}' (текстом, не ссылкой)."
         )
-        response = client.models.generate_content(model="gemini-1.5-flash", contents=prompt)
-        return response.text.strip() if response.text else None
+        
+        # Используем модель flash-001 (она самая быстрая и безотказная)
+        response = client.models.generate_content(model="gemini-1.5-flash-001", contents=prompt)
+        
+        if not response.text: return None
+        
+        # Финальная чистка текста от остатков ссылок
+        clean_text = re.sub(r'http\S+', '', response.text).strip()
+        return clean_text
     except Exception as e:
         logging.error(f"AI Error: {e}")
         return None
@@ -49,13 +62,15 @@ def run_bot():
     bot = telebot.TeleBot(T_TOKEN)
     all_news = []
     for url in SOURCES:
-        try: all_news.extend(feedparser.parse(url).entries)
+        try:
+            feed = feedparser.parse(url)
+            all_news.extend(feed.entries)
         except: continue
     
     all_news.sort(key=lambda x: x.get('published_parsed', (0,)), reverse=True)
     last_saved = get_last_link()
     
-    for entry in all_news[:3]:
+    for entry in all_news[:5]:
         link = entry.link.strip()
         if link == last_saved: break
         
@@ -64,11 +79,13 @@ def run_bot():
         
         if text:
             try:
+                # Отправляем сообщение без лишних кнопок и ссылок
                 bot.send_message(CH_ID, text=text, parse_mode='Markdown')
                 save_last_link(link)
-                return # Публикуем по одной новости за раз
+                logging.info("Успешно опубликовано")
+                return # За один запуск постим одну новость
             except Exception as e:
-                logging.error(f"Post error: {e}")
+                logging.error(f"TG Error: {e}")
 
 if __name__ == "__main__":
     run_bot()
