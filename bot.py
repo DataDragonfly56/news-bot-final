@@ -13,7 +13,6 @@ GITHUB_TOKEN = os.environ.get("MY_GIT_TOKEN")
 REPO = os.environ.get("MY_REPO")
 CHANNEL_ID = "@cryptoteamko"
 
-# СПИСОК ИСТОЧНИКОВ
 SOURCES = [
     "https://news.google.com/rss/search?q=криптовалюта+биткоин&hl=ru&gl=RU&ceid=RU:ru",
     "https://cointelegraph.com/rss",
@@ -59,37 +58,31 @@ def run_bot():
         print("Новостей нет.")
         return
 
-    # Проверяем топ-10 свежих новостей
-    for entry in all_entries[:10]:
+    # ПРОВЕРЯЕМ ТОЛЬКО 3 НОВОСТИ (чтобы хватило лимитов на текст)
+    for entry in all_entries[:3]:
         title, link = entry.title, entry.link
         
         if link.strip() == last_link:
             continue 
 
         try:
-            # ПАУЗА ПЕРЕД ЗАПРОСОМ (чтобы не спамить)
             print(f"Анализирую: {title[:50]}...")
-            time.sleep(12) 
+            time.sleep(20) # Увеличили паузу до 20 секунд
             
-            # 1. Запрос на оценку важности
             check_res = model.generate_content(f"Оцени важность для крипто-инвестора от 1 до 10: '{title}'. Ответь только цифрой.")
             score_text = ''.join(filter(str.isdigit, check_res.text))
             score = int(score_text) if score_text else 0
             
             if score >= 7:
-                print(f"Важность {score}. Готовлю пост...")
-                
-                # Еще одна ПАУЗА перед генерацией текста
-                time.sleep(12) 
+                print(f"Важность {score}. Ждем лимит для создания текста...")
+                time.sleep(25) # Большая пауза перед самым важным запросом
                 
                 instr = (
                     f"Напиши пост по новости: {title}. "
-                    f"ПРАВИЛА: 1. Только РУССКИЙ язык. 2. УДАЛИ любые ссылки. "
-                    f"3. Формат: **Жирный заголовок**, суть в 2-3 предложениях. "
-                    f"4. БЕЗ лишних фраз."
+                    f"ПРАВИЛА: 1. Только РУССКИЙ. 2. БЕЗ ссылок. "
+                    f"3. Формат: **Жирный заголовок**, суть в 2 предложениях."
                 )
                 
-                # 2. Запрос на создание текста
                 post_res = model.generate_content(instr)
                 text = post_res.text
                 text = re.sub(r'http\S+', '', text).strip()
@@ -97,15 +90,15 @@ def run_bot():
                 if text:
                     bot.send_message(CHANNEL_ID, text, parse_mode='Markdown')
                     save_last_link(link)
-                    print("Успешно опубликовано!")
+                    print("Успешно опубликовано в Telegram!")
                     return 
             else:
                 print(f"Пропуск: важность {score}")
                 
         except Exception as e:
             if "429" in str(e):
-                print("Google просит подождать. Отдыхаем 20 секунд...")
-                time.sleep(20)
+                print("Лимит исчерпан. Попробуем в следующий запуск через 30 минут.")
+                return # Выходим, чтобы не мучить API
             else:
                 print(f"Ошибка: {e}")
             continue
