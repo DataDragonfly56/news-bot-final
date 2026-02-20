@@ -6,7 +6,7 @@ import requests
 import re
 import time
 
-# Настройки
+# --- НАСТРОЙКИ ---
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 GITHUB_TOKEN = os.environ.get("MY_GIT_TOKEN")
@@ -40,68 +40,83 @@ def save_last_link(link):
 
 def run_bot():
     bot = telebot.TeleBot(TELEGRAM_TOKEN)
-    available_models = [m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
-    model = genai.GenerativeModel(available_models[0])
+    # Используем стабильную модель flash
+    model = genai.GenerativeModel('gemini-1.5-flash')
     
     last_link = get_last_seen_link()
     all_entries = []
 
+    # Собираем новости
     for url in SOURCES:
         try:
             feed = feedparser.parse(url)
             all_entries.extend(feed.entries)
         except: continue
 
+    # Сортируем (самые свежие в начале)
     all_entries.sort(key=lambda x: x.get('published_parsed', (0,)), reverse=True)
+    
+    # Отбираем только НОВЫЕ новости (которых не было в базе)
+    new_entries = []
+    seen_titles = set()
+    for e in all_entries:
+        if e.link.strip() != last_link:
+            if e.title not in seen_titles:
+                new_entries.append(e)
+                seen_titles.add(e.title)
+        else:
+            break # Дошли до старой новости, дальше не смотрим
+    
+    # Ограничим выборку пятью новостями для экономии запросов
+    new_entries = new_entries[:5]
 
-    if not all_entries:
-        print("Новостей нет.")
+    if not new_entries:
+        print("Новых новостей нет.")
         return
 
-    # ПРОВЕРЯЕМ ТОЛЬКО 3 НОВОСТИ (чтобы хватило лимитов на текст)
-    for entry in all_entries[:3]:
-        title, link = entry.title, entry.link
+    # ШАГ 1: Один запрос к ИИ, чтобы выбрать лучшую новость
+    titles_list = "\n".join([f"{i}. {e.title}" for i, e in enumerate(new_entries)])
+    print(f"Новостей на проверку: {len(new_entries)}")
+    
+    try:
+        prompt_select = (
+            f"Из этого списка новостей выбери ОДНУ самую важную для криптоинвестора. "
+            f"Напиши ТОЛЬКО цифру (номер в списке):\n{titles_list}"
+        )
         
-        if link.strip() == last_link:
-            continue 
-
-        try:
-            print(f"Анализирую: {title[:50]}...")
-            time.sleep(20) # Увеличили паузу до 20 секунд
+        time.sleep(10) # Безопасная пауза
+        res_select = model.generate_content(prompt_select)
+        
+        # Ищем цифру в ответе
+        match = re.search(r'\d+', res_select.text)
+        if match:
+            idx = int(match.group())
+            # Проверка, что индекс не вылетает за границы списка
+            if idx >= len(new_entries): idx = 0 
             
-            check_res = model.generate_content(f"Оцени важность для крипто-инвестора от 1 до 10: '{title}'. Ответь только цифрой.")
-            score_text = ''.join(filter(str.isdigit, check_res.text))
-            score = int(score_text) if score_text else 0
+            best_entry = new_entries[idx]
+            print(f"Выбрана лучшая новость: {best_entry.title}")
             
-            if score >= 7:
-                print(f"Важность {score}. Ждем лимит для создания текста...")
-                time.sleep(25) # Большая пауза перед самым важным запросом
-                
-                instr = (
-                    f"Напиши пост по новости: {title}. "
-                    f"ПРАВИЛА: 1. Только РУССКИЙ. 2. БЕЗ ссылок. "
-                    f"3. Формат: **Жирный заголовок**, суть в 2 предложениях."
-                )
-                
-                post_res = model.generate_content(instr)
-                text = post_res.text
-                text = re.sub(r'http\S+', '', text).strip()
+            # ШАГ 2: Генерация самого поста (второй запрос к ИИ)
+            time.sleep(15) # Пауза перед постом
+            
+            prompt_post = (
+                f"Напиши пост на РУССКОМ языке по новости: {best_entry.title}. "
+                f"ПРАВИЛА: 1. Жирный заголовок. 2. Суть в 2 предложениях. 3. Без ссылок. 4. Без лишних фраз."
+            )
+            
+            post_res = model.generate_content(prompt_post)
+            final_text = re.sub(r'http\S+', '', post_res.text).strip()
 
-                if text:
-                    bot.send_message(CHANNEL_ID, text, parse_mode='Markdown')
-                    save_last_link(link)
-                    print("Успешно опубликовано в Telegram!")
-                    return 
-            else:
-                print(f"Пропуск: важность {score}")
-                
-        except Exception as e:
-            if "429" in str(e):
-                print("Лимит исчерпан. Попробуем в следующий запуск через 30 минут.")
-                return # Выходим, чтобы не мучить API
-            else:
-                print(f"Ошибка: {e}")
-            continue
+            if final_text:
+                bot.send_message(CHANNEL_ID, final_text, parse_mode='Markdown')
+                save_last_link(best_entry.link)
+                print("Успешно опубликовано в Telegram!")
+        else:
+            print("ИИ не смог выбрать номер новости.")
+
+    except Exception as e:
+        print(f"Ошибка лимитов или API: {e}")
 
 if __name__ == "__main__":
     run_bot()
