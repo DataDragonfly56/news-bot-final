@@ -4,7 +4,7 @@ import google.generativeai as genai
 import os
 import requests
 import re
-import time  # Добавили для пауз
+import time
 
 # Настройки
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
@@ -59,7 +59,7 @@ def run_bot():
         print("Новостей нет.")
         return
 
-    # Проверяем топ-10 новостей (уменьшили с 15 до 10 для экономии лимитов)
+    # Проверяем топ-10 свежих новостей
     for entry in all_entries[:10]:
         title, link = entry.title, entry.link
         
@@ -67,16 +67,20 @@ def run_bot():
             continue 
 
         try:
+            # ПАУЗА ПЕРЕД ЗАПРОСОМ (чтобы не спамить)
+            print(f"Анализирую: {title[:50]}...")
+            time.sleep(12) 
+            
             # 1. Запрос на оценку важности
             check_res = model.generate_content(f"Оцени важность для крипто-инвестора от 1 до 10: '{title}'. Ответь только цифрой.")
             score_text = ''.join(filter(str.isdigit, check_res.text))
             score = int(score_text) if score_text else 0
             
-            # ПАУЗА 5 СЕКУНД (чтобы Google не ругался на лимиты)
-            time.sleep(5) 
-            
             if score >= 7:
-                print(f"Публикую: {title} (Важность: {score})")
+                print(f"Важность {score}. Готовлю пост...")
+                
+                # Еще одна ПАУЗА перед генерацией текста
+                time.sleep(12) 
                 
                 instr = (
                     f"Напиши пост по новости: {title}. "
@@ -93,17 +97,15 @@ def run_bot():
                 if text:
                     bot.send_message(CHANNEL_ID, text, parse_mode='Markdown')
                     save_last_link(link)
+                    print("Успешно опубликовано!")
                     return 
-                
-                # Еще одна ПАУЗА после генерации текста
-                time.sleep(5) 
             else:
-                print(f"Пропуск: {title} (Важность {score})")
+                print(f"Пропуск: важность {score}")
                 
         except Exception as e:
             if "429" in str(e):
-                print("Превышен лимит запросов. Отдыхаем 10 секунд...")
-                time.sleep(10)
+                print("Google просит подождать. Отдыхаем 20 секунд...")
+                time.sleep(20)
             else:
                 print(f"Ошибка: {e}")
             continue
