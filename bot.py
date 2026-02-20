@@ -4,6 +4,7 @@ import google.generativeai as genai
 import os
 import requests
 import re
+import time  # Добавили для пауз
 
 # Настройки
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
@@ -12,12 +13,12 @@ GITHUB_TOKEN = os.environ.get("MY_GIT_TOKEN")
 REPO = os.environ.get("MY_REPO")
 CHANNEL_ID = "@cryptoteamko"
 
-# СПИСОК ИСТОЧНИКОВ (Теперь их много!)
+# СПИСОК ИСТОЧНИКОВ
 SOURCES = [
-    "https://news.google.com/rss/search?q=криптовалюта+биткоин&hl=ru&gl=RU&ceid=RU:ru", # Google News (RU)
-    "https://cointelegraph.com/rss", # Мировой лидер (EN)
-    "https://decrypt.co/feed",       # Оперативные новости (EN)
-    "https://www.coindesk.com/arc/outboundfeeds/rss/" # Классика крипты (EN)
+    "https://news.google.com/rss/search?q=криптовалюта+биткоин&hl=ru&gl=RU&ceid=RU:ru",
+    "https://cointelegraph.com/rss",
+    "https://decrypt.co/feed",
+    "https://www.coindesk.com/arc/outboundfeeds/rss/"
 ]
 
 genai.configure(api_key=GEMINI_API_KEY)
@@ -46,32 +47,33 @@ def run_bot():
     last_link = get_last_seen_link()
     all_entries = []
 
-    # Собираем новости изо всех источников в одну кучу
     for url in SOURCES:
         try:
             feed = feedparser.parse(url)
             all_entries.extend(feed.entries)
         except: continue
 
-    # Сортируем по времени (самые свежие — в начале)
     all_entries.sort(key=lambda x: x.get('published_parsed', (0,)), reverse=True)
 
     if not all_entries:
         print("Новостей нет.")
         return
 
-    # Проверяем топ-15 новостей из общего списка
-    for entry in all_entries[:15]:
+    # Проверяем топ-10 новостей (уменьшили с 15 до 10 для экономии лимитов)
+    for entry in all_entries[:10]:
         title, link = entry.title, entry.link
         
         if link.strip() == last_link:
-            continue # Эту уже видели, идем дальше
+            continue 
 
         try:
-            # Оценка важности (снизили порог до 7 для активности)
+            # 1. Запрос на оценку важности
             check_res = model.generate_content(f"Оцени важность для крипто-инвестора от 1 до 10: '{title}'. Ответь только цифрой.")
             score_text = ''.join(filter(str.isdigit, check_res.text))
             score = int(score_text) if score_text else 0
+            
+            # ПАУЗА 5 СЕКУНД (чтобы Google не ругался на лимиты)
+            time.sleep(5) 
             
             if score >= 7:
                 print(f"Публикую: {title} (Важность: {score})")
@@ -80,9 +82,10 @@ def run_bot():
                     f"Напиши пост по новости: {title}. "
                     f"ПРАВИЛА: 1. Только РУССКИЙ язык. 2. УДАЛИ любые ссылки. "
                     f"3. Формат: **Жирный заголовок**, суть в 2-3 предложениях. "
-                    f"4. БЕЗ лишних фраз, только текст поста."
+                    f"4. БЕЗ лишних фраз."
                 )
                 
+                # 2. Запрос на создание текста
                 post_res = model.generate_content(instr)
                 text = post_res.text
                 text = re.sub(r'http\S+', '', text).strip()
@@ -90,11 +93,19 @@ def run_bot():
                 if text:
                     bot.send_message(CHANNEL_ID, text, parse_mode='Markdown')
                     save_last_link(link)
-                    return # Постим одну и уходим до следующего цикла
+                    return 
+                
+                # Еще одна ПАУЗА после генерации текста
+                time.sleep(5) 
             else:
-                print(f"Пропуск: {title} (Важность {score} слишком низкая)")
+                print(f"Пропуск: {title} (Важность {score})")
+                
         except Exception as e:
-            print(f"Ошибка: {e}")
+            if "429" in str(e):
+                print("Превышен лимит запросов. Отдыхаем 10 секунд...")
+                time.sleep(10)
+            else:
+                print(f"Ошибка: {e}")
             continue
 
 if __name__ == "__main__":
