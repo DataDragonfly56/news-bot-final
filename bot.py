@@ -41,7 +41,6 @@ def save_last_link(link):
 def run_bot():
     bot = telebot.TeleBot(TELEGRAM_TOKEN)
     
-    # Автоматический выбор доступной модели (чтобы не было 404)
     available_models = [m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
     if not available_models:
         print("Модели не найдены.")
@@ -59,54 +58,73 @@ def run_bot():
 
     all_entries.sort(key=lambda x: x.get('published_parsed', (0,)), reverse=True)
 
-    if not all_entries:
-        print("Новостей нет.")
+    # 1. Отбираем до 15 НОВЫХ новостей
+    new_entries = []
+    for entry in all_entries:
+        if entry.link.strip() == last_link:
+            break
+        new_entries.append(entry)
+        if len(new_entries) >= 15:
+            break
+
+    if not new_entries:
+        print("Новых новостей нет.")
         return
 
-    # Проверяем 3 новости
-    for entry in all_entries[:3]:
-        title, link = entry.title, entry.link
+    # 2. Формируем список заголовков для ИИ
+    titles_block = ""
+    for i, entry in enumerate(new_entries):
+        titles_block += f"{i}. {entry.title}\n"
+
+    try:
+        print(f"Отправляю на анализ {len(new_entries)} новостей...")
         
-        if link.strip() == last_link:
-            continue 
+        # ШАГ 3: Обновленный промт с аналитикой и запретом на выдумки
+        prompt = (
+            f"Вот список новостей:\n{titles_block}\n"
+            f"ЗАДАНИЕ:\n"
+            f"1. Выбери ОДНУ самую важную и актуальную новость для крипто-инвестора.\n"
+            f"2. Напиши в первой строке ответа только её НОМЕР из списка.\n"
+            f"3. Со следующей строки напиши сам пост.\n\n"
+            f"ПРАВИЛА ПОСТА:\n"
+            f"- Только РУССКИЙ язык. НЕ ВЫДУМЫВАЙ факты, используй только данные из заголовка.\n"
+            f"- Перефразируй новость своими словами (не копируй заголовок вчистую).\n"
+            f"- Добавь краткую аналитику от себя (почему это важно для рынка или инвесторов).\n"
+            f"- БЕЗ каких-либо ссылок.\n"
+            f"- Формат: **Жирный заголовок**, суть и аналитика в 2-3 предложениях.\n"
+            f"- БЕЗ лишних фраз (не пиши 'я выбрал новость №...')."
+        )
 
-        try:
-            print(f"Анализирую: {title[:50]}...")
-            time.sleep(20) # Пауза против ошибки 429
-            
-            check_res = model.generate_content(f"Оцени важность для крипто-инвестора от 1 до 10: '{title}'. Ответь только цифрой.")
-            score_text = ''.join(filter(str.isdigit, check_res.text))
-            score = int(score_text) if score_text else 0
-            
-            if score >= 7:
-                print(f"Важность {score}. Ждем лимит для текста...")
-                time.sleep(25) 
-                
-                instr = (
-                    f"Напиши пост по новости: {title}. "
-                    f"ПРАВИЛА: 1. Только РУССКИЙ. 2. БЕЗ ссылок. "
-                    f"3. Формат: **Жирный заголовок**, суть в 2 предложениях."
-                )
-                
-                post_res = model.generate_content(instr)
-                text = post_res.text
-                text = re.sub(r'http\S+', '', text).strip()
+        # Делаем паузу перед запросом для страховки
+        time.sleep(10)
+        response = model.generate_content(prompt)
+        full_text = response.text.strip()
 
-                if text:
-                    bot.send_message(CHANNEL_ID, text, parse_mode='Markdown')
-                    save_last_link(link)
-                    print("Успешно опубликовано!")
-                    return 
-            else:
-                print(f"Пропуск: важность {score}")
+        # Разделяем номер и текст поста
+        lines = full_text.split('\n', 1)
+        index_match = re.search(r'\d+', lines[0])
+        
+        if index_match and len(lines) > 1:
+            idx = int(index_match.group())
+            post_content = lines[1].strip()
+            
+            if 0 <= idx < len(new_entries):
+                best_entry = new_entries[idx]
                 
-        except Exception as e:
-            if "429" in str(e):
-                print("Лимит исчерпан. Остановка до следующего запуска.")
-                return 
+                # Отправляем в ТГ
+                bot.send_message(CHANNEL_ID, post_content, parse_mode='Markdown')
+                save_last_link(best_entry.link)
+                print(f"Опубликовано: {best_entry.title}")
             else:
-                print(f"Ошибка: {e}")
-            continue
+                print("ИИ указал неверный номер новости.")
+        else:
+            print("ИИ вернул ответ в неправильном формате.")
+
+    except Exception as e:
+        if "429" in str(e):
+            print("Лимит исчерпан. Ждем следующего запуска.")
+        else:
+            print(f"Ошибка: {e}")
 
 if __name__ == "__main__":
     run_bot()
