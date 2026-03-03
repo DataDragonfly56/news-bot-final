@@ -38,6 +38,28 @@ def save_last_link(link):
     data = {"title": "Last Checked News", "body": link, "labels": ["last_news"]}
     requests.post(url, headers=headers, json=data)
 
+# Хелпер для поиска картинки в новости
+def find_image_url(entry):
+    # Пытаемся найти в enclosures (стандартный метод)
+    if 'enclosures' in entry:
+        for enclosure in entry.enclosures:
+            if 'type' in enclosure and enclosure.type.startswith('image'):
+                return enclosure.href
+    
+    # Пытаемся найти в media:content (расширенный метод, часто у Decrypt/CoinTelegraph)
+    if 'media_content' in entry:
+        for content in entry.media_content:
+            if 'url' in content:
+                return content['url']
+
+    # Пытаемся найти в медиа-ссылках
+    if 'links' in entry:
+        for link in entry.links:
+            if 'type' in link and link.type.startswith('image'):
+                return link.href
+                
+    return None
+
 def run_bot():
     bot = telebot.TeleBot(TELEGRAM_TOKEN)
     
@@ -58,12 +80,27 @@ def run_bot():
 
     all_entries.sort(key=lambda x: x.get('published_parsed', (0,)), reverse=True)
 
-    # 1. Отбираем до 15 НОВЫХ новостей
+    # 1. Отбираем до 15 НОВЫХ новостей и пытаемся вытащить картинки сразу
     new_entries = []
+    processed_titles = set()
+
     for entry in all_entries:
         if entry.link.strip() == last_link:
             break
-        new_entries.append(entry)
+        
+        # Убираем дубли по заголовкам (для Google News)
+        if entry.title not in processed_titles:
+            processed_titles.add(entry.title)
+            # Пытаемся найти картинку ДЛЯ КАЖДОЙ новости
+            image_url = find_image_url(entry)
+            
+            # Сохраняем новость и ссылку на картинку вместе
+            new_entries.append({
+                'title': entry.title,
+                'link': entry.link,
+                'image_url': image_url
+            })
+            
         if len(new_entries) >= 15:
             break
 
@@ -71,15 +108,15 @@ def run_bot():
         print("Новых новостей нет.")
         return
 
-    # 2. Формируем список заголовков для ИИ
+    # 2. Формируем список заголовков для ИИ (берем их из нашей новой структуры)
     titles_block = ""
-    for i, entry in enumerate(new_entries):
-        titles_block += f"{i}. {entry.title}\n"
+    for i, entry_data in enumerate(new_entries):
+        titles_block += f"{i}. {entry_data['title']}\n"
 
     try:
         print(f"Отправляю на анализ {len(new_entries)} новостей...")
         
-        # ШАГ 3: Обновленный промт с аналитикой и запретом на выдумки
+        # ШАГ 3: Промт остается прежним
         prompt = (
             f"Вот список новостей:\n{titles_block}\n"
             f"ЗАДАНИЕ:\n"
@@ -95,7 +132,6 @@ def run_bot():
             f"- БЕЗ лишних фраз (не пиши 'я выбрал новость №...')."
         )
 
-        # Делаем паузу перед запросом для страховки
         time.sleep(10)
         response = model.generate_content(prompt)
         full_text = response.text.strip()
@@ -109,12 +145,27 @@ def run_bot():
             post_content = lines[1].strip()
             
             if 0 <= idx < len(new_entries):
-                best_entry = new_entries[idx]
+                best_entry_data = new_entries[idx]
                 
-                # Отправляем в ТГ
-                bot.send_message(CHANNEL_ID, post_content, parse_mode='Markdown')
-                save_last_link(best_entry.link)
-                print(f"Опубликовано: {best_entry.title}")
+                # --- ЛОГИКА ОТПРАВКИ С КАРТИНКОЙ ---
+                if best_entry_data['image_url']:
+                    try:
+                        # Отправляем картинку с подписью
+                        print(f"Пытаюсь отправить с картинкой: {best_entry_data['image_url']}")
+                        bot.send_photo(CHANNEL_ID, best_entry_data['image_url'], caption=post_content, parse_mode='Markdown')
+                        published_ok = True
+                    except Exception as img_e:
+                        print(f"Ошибка отправки картинки: {img_e}, отправляю просто текст")
+                        published_ok = False # Если не вышло с картинкой, отправим текстом ниже
+                else:
+                    published_ok = False # Картинки нет, сразу идем к тексту
+
+                # Резервный вариант (просто текст)
+                if not published_ok:
+                    bot.send_message(CHANNEL_ID, post_content, parse_mode='Markdown')
+
+                save_last_link(best_entry_data['link'])
+                print(f"Опубликовано: {best_entry_data['title']}")
             else:
                 print("ИИ указал неверный номер новости.")
         else:
